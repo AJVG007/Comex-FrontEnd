@@ -25,12 +25,22 @@ interface ProcessedStat {
   Daily?: DailyStat[];
 }
 
+interface LatestDoc {
+  begin?: number;
+  end?: number;
+  processed_statistics?: ProcessedStat[];
+  source?: { nvr_id?: number; base_url?: string };
+}
+
 export default function Dashboard() {
   const [cardsData, setCardsData] = useState<ProcessedStat[]>([]);
   const [barChartData, setBarChartData] = useState<any[]>([]);
   const [lineChartData, setLineChartData] = useState<any[]>([]);
 
-  // ⬇️ nuevo: cámara seleccionada para la BARRA (default 4)
+  // ➜ NVR seleccionado
+  const [selectedNvr, setSelectedNvr] = useState<number>(1);
+
+  // ➜ cámara seleccionada para la BARRA (default 4)
   const [selectedCamera, setSelectedCamera] = useState<number>(4);
 
   // 🔹 YYYY-MM-DD en horario LOCAL (no UTC)
@@ -64,7 +74,7 @@ export default function Dashboard() {
     return raw.charAt(0).toUpperCase() + raw.slice(1);
   };
 
-  // ⬇️ nuevo: construye los datos de la barra para la cámara elegida
+  // ⬇️ construye los datos de la barra para la cámara elegida
   const buildBarChartData = (camera?: ProcessedStat) => {
     const last7 = getLast7Days();
     return last7.map(({ date, ymd }) => {
@@ -78,47 +88,62 @@ export default function Dashboard() {
     });
   };
 
+  // 🔹 pinta un documento (cards + gráficas)
+  const paintFromDoc = (doc: LatestDoc) => {
+    const processed: ProcessedStat[] = doc?.processed_statistics || [];
+    setCardsData(processed);
+
+    // Bar: si la cámara seleccionada no existe en este NVR, intenta 4 y si no la primera
+    const camSel =
+      processed.find((c) => c.ID === selectedCamera) ||
+      processed.find((c) => c.ID === 4) ||
+      processed[0];
+
+    if (camSel) setSelectedCamera(camSel.ID);
+    setBarChartData(buildBarChartData(camSel));
+
+    // Line: ENERO → DICIEMBRE del año del documento
+    const anchor = new Date(((doc?.begin ?? Math.floor(Date.now() / 1000)) as number) * 1000);
+    const year = anchor.getFullYear();
+    const months = Array.from({ length: 12 }, (_, idx) => new Date(year, idx, 1));
+    const series = months.map((d) => ({
+      name: monthName(d),
+      Camara4: 0,
+      Camara5: 0,
+    }));
+
+    const cam4 = processed.find((c) => c.ID === 4);
+    const cam5 = processed.find((c) => c.ID === 5);
+    const idxMesActual = anchor.getMonth(); // 0..11
+
+    if (idxMesActual >= 0 && idxMesActual < series.length) {
+      series[idxMesActual].Camara4 = cam4?.EnterTotal ?? 0;
+      series[idxMesActual].Camara5 = cam5?.EnterTotal ?? 0;
+    }
+    setLineChartData(series);
+  };
+
+  // ➜ Carga “lo último” para un NVR (filtrado por backend)
+  const loadLatest = async (nvr: number) => {
+    const res = await axios.get<LatestDoc>("http://localhost:8000/statistics/latest", {
+      params: { nvr_id: nvr },
+    });
+    paintFromDoc(res.data);
+    console.log("📥 Última (por NVR)", nvr, res.data?.source);
+  };
+
+  // Carga inicial
   useEffect(() => {
-    axios.get("http://localhost:8000/statistics/latest")
-      .then(res => {
-        console.log("📊 Última estadística:", res.data);
-        const processed: ProcessedStat[] = res.data.processed_statistics || [];
-        setCardsData(processed);
-
-        // --- BarChart con cámara 4 por defecto ---
-        const cam4 = processed.find((c: ProcessedStat) => c.ID === 4);
-        setBarChartData(buildBarChartData(cam4));
-
-        // --- LineChart: ENERO → DICIEMBRE del año del documento ---
-        const cam5 = processed.find((c: ProcessedStat) => c.ID === 5);
-
-        // Tomamos el año desde 'begin' del documento (segundos epoch)
-        const anchor = new Date((res.data.begin ?? Math.floor(Date.now() / 1000)) * 1000);
-        const year = anchor.getFullYear();
-
-        // Creamos los 12 meses del año (1 al 12)
-        const months = Array.from({ length: 12 }, (_, idx) => new Date(year, idx, 1));
-
-        // Inicializamos todo en 0
-        const series = months.map(d => ({
-          name: monthName(d), // Solo "Enero", "Febrero", ...
-          Camara4: 0,
-          Camara5: 0,
-        }));
-
-        // Colocamos los totales del mes actual del documento (anchor.getMonth())
-        const idxMesActual = anchor.getMonth(); // 0=Enero ... 11=Diciembre
-        series[idxMesActual].Camara4 = cam4?.EnterTotal ?? 0;
-        series[idxMesActual].Camara5 = cam5?.EnterTotal ?? 0;
-
-        setLineChartData(series);
-      })
-      .catch(err => {
-        console.error("Error cargando estadísticas:", err);
-      });
+    loadLatest(selectedNvr);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ⬇️ nuevo: cuando cambia la cámara seleccionada, recalculamos la barra
+  // Cuando cambia el NVR, recarga
+  useEffect(() => {
+    loadLatest(selectedNvr);
+  }, [selectedNvr]);
+
+  // cuando cambia la cámara, recalcular barras
   useEffect(() => {
     if (cardsData.length === 0) return;
     const cam = cardsData.find((c) => c.ID === selectedCamera);
@@ -127,7 +152,25 @@ export default function Dashboard() {
 
   return (
     <DashboardLayout title="Dashboard de Usuario">
-      <h1 className="text-2xl font-bold mb-2 text-indigo-900">Dashboard Principal</h1>
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-2xl font-bold text-indigo-900">Dashboard Principal</h1>
+
+        {/* ➜ Botones NVR */}
+        <div className="inline-flex rounded-lg overflow-hidden border">
+          <button
+            className={`px-3 py-1 text-sm ${selectedNvr === 1 ? "bg-indigo-600 text-white" : "bg-white"}`}
+            onClick={() => setSelectedNvr(1)}
+          >
+            NVR 1
+          </button>
+          <button
+            className={`px-3 py-1 text-sm ${selectedNvr === 2 ? "bg-indigo-600 text-white" : "bg-white"}`}
+            onClick={() => setSelectedNvr(2)}
+          >
+            NVR 2
+          </button>
+        </div>
+      </div>
 
       {/* Cards dinámicas */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-6">
@@ -149,7 +192,7 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* ⬇️ nuevo: selector de cámara para la gráfica de barras */}
+      {/* selector de cámara para la gráfica de barras */}
       <div className="mb-2">
         <label className="mr-2 font-semibold text-indigo-900">Selecciona cámara:</label>
         <select
